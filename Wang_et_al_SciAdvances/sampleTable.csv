@@ -1,0 +1,13 @@
+sample,condition,Cells,treat.info,Incubation time
+Control-1,control,U87,mock,72h
+Control-2,control,U87,mock,72h
+Control-3,control,U87,mock,72h
+PNA-10b-1,PNA.10b,U87,sgPNA-10b/BNP (150 nM sgPNA-10b),72h
+PNA-10b-2,PNA.10b,U87,sgPNA-10b/BNP (150 nM sgPNA-10b),72h
+PNA-10b-3,PNA.10b,U87,sgPNA-10b/BNP (150 nM sgPNA-10b),72h
+PNA-21-1,PNA.21,U87,sgPNA-21/BNP (150 nM sgPNA-21),72h
+PNA-21-2,PNA.21,U87,sgPNA-21/BNP (150 nM sgPNA-21),72h
+PNA-21-3,PNA.21,U87,sgPNA-21/BNP (150 nM sgPNA-21),72h
+PNA-10b+21-1,PNA10b.21,U87,"sgPNA/BNP (150 nM sgPNA-21, 150 nM sgPNA-10b)",72h
+PNA-10b+21-2,PNA10b.21,U87,"sgPNA/BNP (150 nM sgPNA-21, 150 nM sgPNA-10b)",72h
+PNA-10b+21-3,PNA10b.21,U87,"sgPNA/BNP (150 nM sgPNA-21, 150 nM sgPNA-10b)",72h

@@ -1,0 +1,617 @@
+---
+title: "Anti-seed PNAs targeting multiple oncomiRs for brain tumor therapy"
+author: "Vijender Singh, CBC, UCHC"
+date: "`2023-02-06"
+output:
+   pdf_document:
+    latex_engine: xelatex
+email: vijender.singh@uconn.edu
+---
+```{r setup, include=TRUE}
+rm(list=ls())
+gc()
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+
+
+# Load Packages
+suppressPackageStartupMessages(library("dplyr",quietly=TRUE))
+suppressPackageStartupMessages(library("tidyverse",quietly=TRUE))
+suppressPackageStartupMessages(library("genefilter",quietly=TRUE))
+suppressPackageStartupMessages(library("grDevices",quietly=TRUE))
+suppressPackageStartupMessages(library("ggrepel",quietly=TRUE))
+suppressPackageStartupMessages(library("pheatmap",quietly=TRUE))
+suppressPackageStartupMessages(library("RColorBrewer",quietly=TRUE))
+suppressPackageStartupMessages(library("gplots",quietly=TRUE))
+suppressPackageStartupMessages(library("RColorBrewer", quietly=TRUE))
+suppressPackageStartupMessages(library("ggplot2", quietly=TRUE))
+suppressPackageStartupMessages(library("labeling", quietly=TRUE))
+suppressPackageStartupMessages(library("DESeq2",quietly=TRUE))
+suppressPackageStartupMessages(library("skimr",quietly=TRUE))
+suppressPackageStartupMessages(library("here",quietly=TRUE))
+suppressPackageStartupMessages(library("data.table",quietly=TRUE))
+suppressPackageStartupMessages(library(fgsea,quietly=TRUE))
+suppressPackageStartupMessages(library(org.Hs.eg.db,quietly=TRUE))
+suppressPackageStartupMessages(library(msigdbr,quietly=TRUE))
+suppressPackageStartupMessages(library(clusterProfiler,quietly=TRUE))
+suppressPackageStartupMessages(library(enrichplot,quietly=TRUE))
+suppressPackageStartupMessages(library(DOSE,quietly=TRUE))
+#Project Directory
+projectDir=setwd(here("."))
+print(paste0("Project Directory :", projectDir ))
+```
+
+# RNAseq analysis : All Samples{.tabset}
+## Data Import
+#### Import Counts Matrix and Sample Metadata
+The data is in tab-separated test (.txt) format.  Data is imported using `fred` function from `data.table` package. The sample metadat is vaialable in `sampleTable.csv` file and is read in using `read.csv` function. 
+```{r dataImport, include=TRUE, echo=FALSE,results="hold", warning=FALSE,}
+# Read in counts and assign geneID as rowname
+counts<-fread(file="CountsMatrix.txt") %>% column_to_rownames(.,var="geneID")
+
+# Read in sampleTable and assign sample column values as rownames
+sampleTable<-read.csv(file="sampleTable.csv") %>% mutate(., rowname=sample) %>% column_to_rownames(., var="rowname")
+sampleTable$condition<-as.factor(sampleTable$condition)
+
+#Setting up reference level for comparisons
+ref_level="control"
+
+# Creating a dataframe of Ensembl geneIDs and common gene name
+ref <-counts[ncol(counts)]
+counts<-counts[,1:(ncol(counts)-1)]
+
+#Prepare reference
+## Get all the values that are available useing
+# columns(org.Hs.eg.db) or keytypes(org.Hs.eg.db)
+# GENENAME :  This gives description of genes e.g SCY1 like pseudokinase 3
+# ENTREZID :  These are numeric IDs e.g 57147
+# SYMBOL  :  This gives common names e.g SCYL3
+
+# Add gene full name
+ref$description <- mapIds(x = org.Hs.eg.db,
+                              keys = row.names(ref),
+                              column = "GENENAME",
+                              keytype = "ENSEMBL",
+                              multiVals = "first")
+# Add ensemblID
+ref$ensembl <- row.names(ref)
+# Add ENTREZ ID
+ref$entrez <- mapIds(x = org.Hs.eg.db,
+                         keys = row.names(ref),
+                         column = "ENTREZID",
+                         keytype = "ENSEMBL",
+                         multiVals = "first")
+# Add GENENAME BASED on Ensembl
+ref$GENENAME<- mapIds(x = org.Hs.eg.db,
+                          keys = row.names(ref),
+                          column = "SYMBOL",
+                          keytype = "ENSEMBL",
+                          multiVals = "first")
+# Add GENENAME BASED on ENTREZ
+ref$GENENAME_entrezid <- mapIds(x = org.Hs.eg.db,
+                                keys = ref$entrez,
+                                column = "SYMBOL",
+                                keytype = "ENTREZID",
+                                multiVals = "first")
+
+refout = data.frame(lapply(ref, as.character), stringsAsFactors=FALSE)
+write.table(refout, file="reference_used.csv")
+```
+
+```{r Stat_out1 ,echo=FALSE, include=TRUE, warning=FALSE, results="asis"}
+# Print out Data info
+cat("\n Count matrix Stats: \n Features(genes) : ", nrow(counts), "\n Number of samples : ", ncol(counts)-1)
+cat("\n \n Sample Meatadata\n")
+sampleTable
+cat ("\n\n Reference file \n")
+head(ref)
+```
+
+
+#### Filtering
+In this step we will filter out genes with very low counts across the samples.  DESeq2 performs independent filtering but reducing the dimension of input dataset can speed up the process in large datasets.
+
+```{r countFiltering, include=TRUE, results="hold"}
+genesInAssay<-dim(counts)[1]
+
+# Filtering genes with some parameters.
+minimumCountpergene=10
+MinSampleWithminimumgeneCounts=4
+counts<-counts[rowSums(data.frame(counts>minimumCountpergene))>MinSampleWithminimumgeneCounts,]
+
+cat(c("\n Total genes before filtering : ",genesInAssay),sep=" ",append=TRUE)
+cat(c("\n Minimum Counts per gene : ",minimumCountpergene),sep=" ",append = TRUE)
+cat(c("\n Minimum Samlpes with Minimum Counts per gene : ",MinSampleWithminimumgeneCounts),sep=" ",append = TRUE)
+cat(c("\n Total genes after filtering : ",dim(counts)[1]),sep=" ",append=TRUE)
+```
+
+
+## Counts QC
+
+In this step we will perform few QC steps to check data completeness and will also try to identify if any sample is behaving odd from the raw counts perspective.
+
+##### QC1. Sample checks
+Test that all the input samples in sampleTable have their corresponding counts in the `counts` object.
+```{r sampletable2, include=TRUE, results="hold"}
+
+if (sum(colnames(counts) %in% sampleTable$sample) == length(sampleTable$sample)){
+  message("Good News !!! Samples in count matrix matches with that of in sampleTable")
+}
+
+cat("\n\n Matching order of samples between counts and sampleTable \n")
+counts<-counts[sampleTable$sample]
+
+cat("\n Is the sample orders identical between counts matrix and sampletable \n")
+identical(colnames(counts),sampleTable$sample)
+
+cat("\n\n Convert metadata in categorical data whereever applicable\n")
+sampleTable$condition<-as.factor(sampleTable$condition)
+
+str(sampleTable)
+
+```
+
+##### QC2. QC of counts distribution per sample.
+
+```{r QC2 ,echo=FALSE, include=TRUE, warning=FALSE, results="asis",fig.height = 6, fig.width = 8, fig.align = "center"}
+df.m <- reshape2::melt(counts, id.vars =NULL)
+plot_count_violin<- ggplot(df.m,aes(factor(variable),log10(value),fill=factor(variable))) +
+  geom_violin() +
+  theme(axis.text.x = element_text(angle=90,vjust=0.5,hjust=1))
+
+cat(paste0("####  Sample: Count distribution Violin plot  {.tabset} \n")) 
+cat('\n##### **Violin Count Plot** \n')
+suppressWarnings(print(plot_count_violin))
+cat('\n\n')
+```
+
+
+Quality check of samples to identify outliers or odd behaving samples.
+```{r  include=TRUE, warning=FALSE}
+df_qc<-skim(counts)
+head(df_qc)
+```
+Look at the distribution of mean and std.deviation of counts across all samples.
+```{r QC1 ,echo=FALSE, include=TRUE, warning=FALSE, results="asis",fig.height = 6, fig.width = 8, fig.align = "center"}
+mean_sd_plot <- ggplot(df_qc,aes(numeric.mean,numeric.sd, col=sampleTable$genotype_condition))+
+  geom_point(size=3, alpha=0.6)+
+  geom_text_repel(label=df_qc$skim_variable)
+cat(paste0("####  Sample Counts : Mean  and Standard Deviation  {.tabset} \n")) 
+cat('\n##### **Counts Mean and Standard deviation plot** \n')
+suppressWarnings(print(mean_sd_plot))
+cat('\n\n') 
+```
+
+
+## DESeq2
+
+##### Create DESeq2 Object
+In this analysis `control` samples are used as refrence condition for statistical analysis.
+```{r  DESeq2_obj,include=TRUE, warning=FALSE} 
+# reassuring that order of samples in rows of sampleTable are identical with the sample order in count matrix
+counts<-counts[sampleTable$sample]
+
+dds <- DESeqDataSetFromMatrix(countData = as.matrix(counts),
+                              colData=sampleTable,
+                              design = ~condition)
+
+# Setting "control" as baseline or reference
+dds$condition<-relevel(dds$condition, ref=ref_level)
+
+dds
+```
+##### Executing DESeq2
+```{r  DESeq2_funcn,include=TRUE, warning=FALSE,  results="hold"} 
+
+dds<-DESeq(dds)
+
+```
+
+Accessing results 
+```{r  DESeq2_reslts,include=TRUE, warning=FALSE} 
+resultsNames(dds)
+
+## Access and saving normalised counts
+normcounts<-as.data.frame(counts(dds,normalized =TRUE))
+
+normAnnot<-merge(normcounts,ref, by=0, all.x=T)
+normAnnot = data.frame(lapply(normAnnot, as.character), stringsAsFactors=FALSE)
+write.csv(normAnnot,file="NormalisedCounts.csv")
+```
+
+
+## Sample QC
+Sample to sample Distance Matrix
+```{r Sample2Sample_DistMatrix, include=TRUE, warning=FALSE}
+
+rld <- rlogTransformation(dds, blind=T)
+vsd <- varianceStabilizingTransformation(dds, blind=T)
+
+sampleDists <- dist(t(assay(rld)))
+sampleDistMatrix <- as.matrix(sampleDists)
+
+sampleDistMatrix_meta<-merge(sampleDistMatrix,sampleTable, by=0, sort=FALSE) %>% column_to_rownames(., var="Row.names")
+
+head(sampleDistMatrix_meta)
+```
+
+```{r PlotSample2SampleDistMtx ,echo=FALSE, include=TRUE, warning=FALSE, results="asis",fig.height = 4, fig.width = 6, fig.align = "center"}
+
+ann_df<-sampleDistMatrix_meta[c(14)]
+#str(sampleTable)
+#control PNA_10b PNA_21 PNA10+21
+ann_colors <- list( condition = c(
+              "control" ="coral1",
+              "PNA.10b" = "steelblue1", 
+              "PNA.21" = "violet",
+              "PNA10b.21"="yellowgreen" ))
+
+heat_map <- pheatmap(sampleDistMatrix,
+                     labels_row = rownames(sampleDistMatrix),
+                     labels_col = rownames(sampleDistMatrix),
+                     annotation_row = ann_df, 
+                     annotation_col = ann_df, 
+                     annotation_colors = ann_colors,
+                     cellwidth=14,
+                     #cellheight=12
+                     )
+
+```
+
+Principal component Analysis
+
+Principal Component Analysis (PCA) is a widely used statistical method in the analysis of differential gene expression data. It helps in understanding the underlying structure of high-dimensional data, like gene expression profiles, by reducing its complexity. PCA achieves this by transforming the original variables into a new set of uncorrelated variables called principal components, which are ordered so that the first few retain most of the variation present in all of the original variables.
+
+In the context of differential gene expression, PCA is particularly useful for several reasons:
+
+1. Data Visualization: PCA allows for the visualization of complex gene expression data in two or three dimensions. This can help in identifying patterns, trends, or clusters in the data that might indicate similarities or differences in gene expression under various conditions or among different samples.
+
+2. Noise Reduction: By focusing on principal components that capture the most variance, PCA can help filter out noise and reduce the dimensionality of the data, making further analysis more tractable.
+
+3. Identification of Important Genes: The loading scores of the principal components can be used to identify genes that contribute most to the variance in the data. These genes can be candidates for further study as they might play significant roles in the biological processes or conditions being studied.
+
+4. Batch Effect Correction: PCA can help in identifying and correcting for batch effects, which are technical non-biological differences between batches of samples that can affect gene expression levels.
+
+5. Comparative Analysis: By comparing the PCA results of different conditions or experiments, researchers can identify shifts in the principal component space, indicating changes in gene expression profiles associated with different biological states or treatments.
+
+```{r PCA_plots_cal, include=TRUE, warning=FALSE}
+rv <- rowVars(assay(rld))
+select <- order(rv, decreasing=T)[seq_len(min(500,length(rv)))]
+pc <- prcomp(t(assay(vsd)[select,]))
+scores <- data.frame(pc$x)
+scores<-cbind(scores,sampleTable)
+summary(pc)
+pc1prcnt=as.character(as.integer(summary(pc)$importance[2,1]*100))
+pc2prcnt=as.character(as.integer(summary(pc)$importance[2,2]*100))
+pc3prcnt=as.character(as.integer(summary(pc)$importance[2,3]*100))
+pc4prcnt=as.character(as.integer(summary(pc)$importance[2,4]*100))
+pc5prcnt=as.character(as.integer(summary(pc)$importance[2,5]*100))
+pc6prcnt=as.character(as.integer(summary(pc)$importance[2,6]*100))
+
+names<-rownames(scores)
+
+pc12 <-ggplot(scores, aes(x = PC1, y = PC2, label=names,col = (factor(condition))))+
+  geom_point(size = 5)+
+  geom_text_repel(label=names,col="black")+
+  ggtitle("Principal Components")+
+  xlab(paste0("PC1 (",pc1prcnt,"%)")) +
+  ylab(paste0("PC2 (",pc2prcnt,"%)"))
+
+pc34 <-ggplot(scores, aes(x = PC3, y = PC4, label=names,col = (factor(condition))))+
+  geom_point(size = 5)+
+  geom_text_repel(label=names,col="black")+
+  ggtitle("Principal Components")+
+  xlab(paste0("PC3 (",pc3prcnt,"%)")) +
+  ylab(paste0("PC4 (",pc4prcnt,"%)"))
+
+pc56 <-ggplot(scores, aes(x = PC5, y = PC6, label=names,col = (factor(condition))))+
+  geom_point(size = 5)+
+  geom_text_repel(label=names,col="black")+
+  ggtitle("Principal Components")+
+  xlab(paste0("PC5 (",pc5prcnt,"%)")) +
+  ylab(paste0("PC6 (",pc6prcnt,"%)"))
+```
+
+```{r PCA_plots_plot, echo=FALSE, include=TRUE, warning=FALSE, results="asis",fig.height = 6, fig.width = 8, fig.align = "center"}
+
+plts_PCA<-list(pc12,pc34,pc56)
+labels_pcs<-c("PC12","PC34","PC56")
+cat("\n### PCA Plots  {.tabset} \n") 
+for(i in seq(1,3)){
+  cat('#### Plot',labels_pcs[i],'   \n')
+  cat('\n')
+  suppressWarnings(print(plts_PCA[[i]]))
+  cat('\n\n')
+}
+```
+
+## MA_Volcano.Plots
+
+
+
+```{r VolcanoPlot_1, include=TRUE, warning=FALSE}
+
+comparison_matrix<-resultsNames(dds)[-1]
+
+source("../../DataAnalysis/Rscripts/volcanoCode_updatedApr2024.R")
+
+resout<-list()
+shrink_plots_list <- list()
+volcano_plot_list <- list()
+ma_plot_list <- list()
+
+padj_threshold=0.05
+
+lf_raw_shrink_plot<-function(raw_res,shrink_res,padj_threshold=0.05){
+  plotdf<-data.frame("lfraw"=raw_res$log2FoldChange,"lfshrink"=shrink_res$log2FoldChange)
+  plotdf["significant"]<-as.factor(ifelse(raw_res$padj<padj_threshold & abs(shrink_res$log2FoldChange)>0.58,"Significant","NotSignificant"))
+  ggplot(plotdf,aes(lfraw,lfshrink,col=significant)) + geom_point()+
+    ggtitle(paste0("Raw.Log2FC vs Shrinked.Log2FC","_",AnalysisID))
+}
+
+for (i in 1:3){
+  AnalysisID <- paste0(comparison_matrix[i],"_14March2024")
+  raw_res <- results(dds, name = comparison_matrix[i])
+  shrink_res <- lfcShrink(dds,type="ashr",coef = comparison_matrix[i],quiet=TRUE)
+  raw_res_anno <- merge(as.data.frame(raw_res) ,ref, by=0, all.x=TRUE, sort=FALSE)
+  shrink_res_anno <- merge(as.data.frame(shrink_res),ref, by=0, all.x=TRUE,sort=FALSE)
+  resout[[paste0(AnalysisID,"_raw")]] <- raw_res_anno
+  resout[[paste0(AnalysisID,"_shrink")]] <- shrink_res_anno
+  plotdf<-data.frame("lfraw"=raw_res$log2FoldChange,"lfshrink"=shrink_res$log2FoldChange)
+  plotdf["significant"]<-as.factor(ifelse(raw_res$padj<padj_threshold &   abs(shrink_res$log2FoldChange)>0.58,"Significant","NotSignificant"))
+  
+  raw_shrink_plots<- ggplot(plotdf,aes(lfraw,lfshrink,col=significant)) + geom_point()+
+    ggtitle(paste0("Raw.Log2FC vs Shrinked.Log2FC","_",AnalysisID))
+  
+
+   Vol_plot<-volcanoPlot(shrink_res_anno,
+            geneName.col="gene_name",
+            plot.title=paste0("Shrink_Volcano Plot :",AnalysisID),
+                              lfc_cut_off=0.58)
+   
+   volcano_plot_list[[AnalysisID]] <- Vol_plot
+   
+   raw_Vol_plot<-volcanoPlot(raw_res_anno,
+            geneName.col="gene_name",
+            plot.title=paste0("Raw_Volcano Plot :",AnalysisID),
+                              lfc_cut_off=0.58)
+   
+   #raw_ma <- plotMA(raw_res, ylim=c(-2,2))
+   #shrink_ma<- plotMA(shrink_res, ylim=c(-2,2))
+   
+   ma_plot_list[[paste0("RAW_",AnalysisID)]]<- raw_res
+   
+   ma_plot_list[[paste0("Shrink_",AnalysisID)]] <- shrink_res
+   
+   
+   volcano_plot_list[[paste0("RAW_",AnalysisID)]] <- raw_Vol_plot
+   
+   shrink_plots_list[[paste0("Shrink_",AnalysisID)]] <- raw_shrink_plots
+   
+    raw_res_anno = data.frame(lapply(raw_res_anno, as.character), stringsAsFactors=FALSE)
+   shrink_res_anno = data.frame(lapply(shrink_res_anno, as.character), stringsAsFactors=FALSE)
+   write.csv(raw_res_anno, file=paste0(AnalysisID ,"_RawDE.csv"))
+   write.csv(shrink_res_anno,file=paste0(AnalysisID ,"_ShrinkDE.csv")) 
+}
+
+```
+The lfcShrink function in DESeq2 is designed to perform shrinkage estimation of the log2 fold changes (log2FC) in differential expression analysis. DESeq2 is a popular R package used for analyzing count-based data, like RNA-Seq or other forms of genomic data that come in the form of read counts. The main goal of DESeq2 is to find differentially expressed genes between experimental conditions by modeling count data using negative binomial distributions.
+
+The lfcShrink method is particularly useful because it addresses a common issue in differential expression analysis: the estimation of log2 fold changes, especially for genes with low counts or high variance, can be noisy, leading to overestimation of the true effect sizes. Shrinkage estimators pull the estimated log2 fold changes towards zero (or towards a specified prior if different from zero), reducing the influence of noisy estimates on downstream analysis and interpretation. This process tends to improve the stability and reliability of the log2 fold change estimates.
+
+A plot that can be useful to exploring our results is the MA plot. The MA plot shows the mean of the normalized counts versus the log2 foldchanges for all genes tested. The genes that are significantly DE are colored to be easily identified. This is also a great way to illustrate the effect of LFC shrinkage. The DESeq2 package offers a simple function to generate an MA plot. That is, many of the low expressors exhibit very high fold changes. After shrinkage, we see the fold changes are much smaller estimates.
+
+```{r ma_Plots, echo=FALSE, include=TRUE, warning=FALSE, results="asis",fig.height = 6, fig.width = 8, fig.align = "center"}
+
+ma_ID <-names(ma_plot_list)
+
+cat("\n### MA plot Raw and Shrink results  {.tabset} \n") 
+for(ma_names in ma_ID){
+  cat('#### Plot :',ma_names,'   \n')
+  cat('\n')
+  suppressWarnings(print(plotMA(ma_plot_list[[ma_names]], ylim=c(-2,2))))
+  cat('\n\n')
+}
+```
+
+The plots below are scatter plot of Raw and shrink data to further illustrate effect of shrinkage.
+
+```{r ShrinkPlots, echo=FALSE, include=TRUE, warning=FALSE, results="asis",fig.height = 6, fig.width = 8, fig.align = "center"}
+
+shrink_ID <-names(shrink_plots_list)
+
+cat("\n### Raw and Shrink log2FoldChange  {.tabset} \n") 
+for(shrink_names in shrink_ID){
+  cat('#### Plot :',shrink_names,'   \n')
+  cat('\n')
+  suppressWarnings(print(shrink_plots_list[[shrink_names]]))
+  cat('\n\n')
+}
+```
+
+Volcano plot is a type of scatter plot that is commonly used in bioinformatics to visually display the results of differential expression analyses, among other applications. It plots significance versus fold-change on the y and x axes, respectively, making it an effective tool for quickly identifying genes that are significantly differentially expressed between two experimental conditions.
+```{r VolcanoPlots, echo=FALSE, include=TRUE, warning=FALSE, results="asis",fig.height = 6, fig.width = 8, fig.align = "center"}
+
+vol_ID <-names(volcano_plot_list)
+
+cat("\n### Volcano Plots  {.tabset} \n") 
+for(vol_names in vol_ID){
+  cat('#### Plot :',vol_names,'   \n')
+  cat('\n')
+  suppressWarnings(print(volcano_plot_list[[vol_names]]))
+  cat('\n\n')
+}
+```
+
+## GeneStats_VennDiagram
+
+In this section we will explore genes that are differentially expressed between each comparison and the overlap.
+
+```{r PathwayAnalysis, include=TRUE, warning=FALSE}
+rm(list=ls())
+
+up_gene_list <- list()
+down_gene_list <- list()
+DE_gene_list <- list()
+resultdf <- data.frame()
+ 
+padj=0.05
+log2fc=0.58
+files<-list.files(".", pattern = "DE.csv$")
+prefx<-c("PNA.10b_RAW","PNA.10b_shrink","PNA.21_Raw","PNA.21_shrink", "PNA10b.21_raw","PNA10b.21_shrink")  
+for (i in 1:length(files)){
+  fileName=files[i]
+  pref=prefx[i]
+  df<-read.csv(fileName) %>% 
+  column_to_rownames(., var="Row.names") %>% 
+  dplyr::select(.,log2FoldChange,padj,gene_name) %>%
+  filter(.,padj < 0.05 & abs(log2FoldChange) > 0.58)
+  
+    up_gene_list[[pref]]<-rownames(df[df$log2FoldChange > 0.58,])
+    down_gene_list[[pref]]<-rownames(df[df$log2FoldChange < (-0.58),])
+    DE_gene_list[[pref]] <-rownames(df)
+    
+    resultdf<-rbind(resultdf,data.frame("Comparison"=pref,"Up"=length(up_gene_list[[pref]]), "Down"=length(down_gene_list[[pref]]),"totalDE"=length(DE_gene_list[[pref]])))
+}
+
+suppressPackageStartupMessages(library(ggvenn,quietly = TRUE))
+
+vennplot<-list()
+
+venngenelist<-list("up"=up_gene_list, "down"=down_gene_list, "DE"=DE_gene_list)
+
+for(ven in names(venngenelist)){
+
+p1<-ggvenn(
+  venngenelist[[ven]][c(1,3,5)],
+  fill_color = c("steelblue1","lightgreen","violet"),
+  stroke_size = 0.5, set_name_size = 6
+  )
+
+p2<-ggvenn(
+  venngenelist[[ven]][c(2,4,6)],
+  fill_color = c("steelblue1","lightgreen","violet"),
+  stroke_size = 0.5, set_name_size = 6
+  )
+
+vennplot[[paste0(ven,"_raw")]]<-p1
+vennplot[[paste0(ven,"_shrink")]]<-p2
+}
+
+resultdf
+
+```
+
+
+In order to get an estimate of overlap between different comparisons lets put some venn diagram together.
+
+```{r VennPlots, echo=FALSE, include=TRUE, warning=FALSE, results="asis",fig.height = 6, fig.width = 6, fig.align = "center"}
+
+venn_ID <-names(vennplot)
+
+cat("\n### Venn Diagramsfor overlap of genes  {.tabset} \n") 
+for(venn_names in venn_ID){
+  cat('#### Plot :',venn_names,'   \n')
+  cat('\n')
+  suppressWarnings(print(vennplot[[venn_names]]))
+  cat('\n\n')
+}
+```
+
+## Pathway
+
+### Wiki Pathways
+```{r PathwayAnalysis2, include=TRUE, warning=FALSE, results="asis",fig.height = 10, fig.width = 8, fig.align = "center"}
+
+
+pna10b_21<-read.csv("condition_PNA10b.21_vs_control_14March2024_RawDE.csv")%>% 
+  column_to_rownames(., var="Row.names") %>% 
+  dplyr::select(., log2FoldChange,padj,gene_name,entrez)%>%
+  filter(.,padj < 0.05)%>%
+  arrange(desc(log2FoldChange))
+colnames(pna10b_21)<-paste0("pna10b.21_",colnames(pna10b_21))
+pna10b.21_rank<-pna10b_21$pna10b.21_log2FoldChange
+names(pna10b.21_rank)<-as.character(pna10b_21$pna10b.21_entrez)
+pna10b.21_rank_f<-pna10b.21_rank[!is.na(names(pna10b.21_rank))]
+dwn_de<-names(pna10b.21_rank[pna10b.21_rank<(-0.58)])
+dwn_de<-dwn_de[!is.na(dwn_de)]
+
+wiki<-enrichWP(dwn_de, organism = "Homo sapiens") 
+
+dotplot(wiki, showCategory=30)
+
+
+```
+
+```{r GOMF, include=TRUE, warning=FALSE, results="asis"}
+ggoMF <- groupGO(gene     = dwn_de,
+               OrgDb    = org.Hs.eg.db,
+               ont      = "MF",
+               level    = 2,
+               readable = TRUE) %>%
+  arrange(desc(Count))
+head(ggoMF[,c(1:4)],20)
+```
+
+
+```{r GOBP, include=TRUE, warning=FALSE, results="asis"}
+ggoBP <- groupGO(gene     = dwn_de,
+               OrgDb    = org.Hs.eg.db,
+               ont      = "BP",
+               level    = 6,
+               readable = TRUE) %>%
+  arrange(desc(Count))
+
+head(ggoBP[,c(1:4)],20)
+
+
+```
+
+## Survival
+
+```{r Survival, include=TRUE, warning=FALSE, results="asis"}
+library("survival")
+library("ggsurvfit")
+library("gtsummary")
+miRexp<-fread("./gdac.broadinstitute.org_GBMLGG.Merge_mirnaseq__illuminahiseq_mirnaseq__bcgsc_ca__Level_3__miR_gene_expression__data.Level_3.2016012800.0.0/miRNA_exp_survival_HH_LL.csv")
+
+clinout<-fread("./gdac.broadinstitute.org_GBMLGG.Clinical_Pick_Tier1.Level_4.2016012800.0.0/GBMLGG.clin.merged.picked.txt")
+
+head(miRexp)
+head(clinout)
+
+df<-merge(miRexp,clinout,by.x="Hybridization REF", by.y="Hybridization_REF",all.x=T, sort=F)
+
+head(df)
+
+df$status<-0
+df<-df[,c("Hybridization REF","Status","days_to_death","status")]
+colnames(df)<-c("patID","exprs","time","status")
+
+df<-df[complete.cases(df$time)]
+
+head(df)
+df$expCoded<-0
+df$expCoded[df$exprs=="HH"]<-1
+coxph(Surv(time, status) ~ exprs, data = df)
+df<-df[complete.cases(df$patID)]
+
+p <- survfit2(Surv(time) ~ expCoded, data = df) |>
+  ggsurvfit(linewidth = 1) +
+  add_confidence_interval() +
+  add_risktable() +
+  add_quantile(y_value = 0.6, color = "gray50", linewidth = 0.75) +
+  scale_ggsurvfit()
+
+p
+
+```
+
+
+
+
+
+
+
+
+
