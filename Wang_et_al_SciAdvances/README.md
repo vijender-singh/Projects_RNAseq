@@ -5,6 +5,7 @@
 
 Analysis Steps:
 
+- fstaq to COunt matrix :  Code is in `RNAseq_script_lowSpace_Fastq_2_CountMatrix.sh` script
 -	Counts QC
 -	DESeq2 
 -	PCA analysis
