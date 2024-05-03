@@ -7,6 +7,9 @@ Analysis Steps
 - [Resource download](#resources)
 - [Reference Index](#Index)
 - [Read QC and Trimming](#read-qc--3-step-process)
+- [Mapping](#read-mapping)
+- [Feature count](#feature-count)
+- [Differential Expression](#differential-expression)
 
 
 ### Introduction
@@ -255,6 +258,8 @@ The featurecount performance on bowtie and STAR bam files can be seen below.
 ![Feature Count](./images/featureCOunt.png)
 
 It appears that bowtie bam files have performed marginally better than STAR alignment files.  The count matrix generated from bowtie aligned reads was used in `R` for calling differential expression.
+
+#### Differential Expression
 
 The Script used in DESeq2 is in scripts folder and the pdf and html version of R notebook is availble in this directory.
 
